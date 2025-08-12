@@ -1,90 +1,72 @@
 # main.py
 import os
+from telethon import TelegramClient, events
 import requests
-import logging
-from threading import Thread
-from time import sleep
-
 from flask import Flask
-from telethon import TelegramClient, events, errors
 
-from config import BOT_TOKEN, API_ID, API_HASH, TMDB_API, IMDB_API, MOVIE_PAGE_BASE
+# Env variables
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8347005060:AAHf11nTICnku70OKIcX8OccXr8DlhKa17s")
+API_ID = int(os.getenv("API_ID", "26954495"))
+API_HASH = os.getenv("API_HASH", "2061c55207cfee4f106ff0dc331fe3d9")
+TMDB_API = os.getenv("TMDB_API", "0da8b26f661ce60b48bb5f2876e13c74")
+IMDB_API = os.getenv("IMDB_API", "https://imdb-api-lux.wemedia360.workers.dev/")
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("movie-bot")
+# Telegram Client
+client = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# --- Telegram client (Telethon) ---
-client = TelegramClient("movie_bot_session", API_ID, API_HASH)
+# Web server (Render ping prevention)
+app = Flask(__name__)
 
-# Start client with bot token when running
-async def start_telethon_bot():
-    await client.start(bot_token=BOT_TOKEN)
-    logger.info("Telethon bot started.")
+@app.route("/")
+def home():
+    return "Bot is running!"
 
-# Utility: fetch TMDB details by id or search by name
-def tmdb_get_by_id(tmdb_id: str):
-    url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
-    params = {"api_key": TMDB_API, "append_to_response": "external_ids,credits", "language": "en-US"}
-    r = requests.get(url, params=params, timeout=15)
-    return r.json() if r.status_code == 200 else None
+# Movie Info Command
+@client.on(events.NewMessage(pattern="/movie"))
+async def movie_handler(event):
+    query = event.text.replace("/movie", "").strip()
+    if not query:
+        await event.reply("Please provide a movie name. Example: `/movie The Pickup 2025`")
+        return
 
-def tmdb_search(query: str):
-    url = "https://api.themoviedb.org/3/search/movie"
-    params = {"api_key": TMDB_API, "query": query, "language": "en-US", "page": 1}
-    r = requests.get(url, params=params, timeout=15)
-    j = r.json() if r.status_code == 200 else {}
-    results = j.get("results") or []
-    return results[0] if results else None
+    # TMDB search
+    tmdb_url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API}&query={query}"
+    tmdb_data = requests.get(tmdb_url).json()
 
-def imdb_fetch(imdb_id: str):
-    if not imdb_id:
-        return None
-    # IMDB_API assumed to accept ?id=ttXXXXX
-    url = f"{IMDB_API}?id={imdb_id}"
-    try:
-        r = requests.get(url, timeout=12)
-        return r.json() if r.status_code == 200 else None
-    except Exception:
-        return None
+    if not tmdb_data.get("results"):
+        await event.reply("Movie not found on TMDB.")
+        return
 
-def build_caption(tmdb_data: dict, imdb_data: dict = None):
-    title = tmdb_data.get("title") or tmdb_data.get("name") or "Unknown Title"
-    release_date = tmdb_data.get("release_date") or "N/A"
-    year = release_date[:4] if release_date and release_date != "N/A" else ""
-    genres = ", ".join([g["name"] for g in tmdb_data.get("genres", [])]) or "N/A"
-    rating = tmdb_data.get("vote_average") or "N/A"
-    overview = tmdb_data.get("overview") or "No overview available."
-    imdb_id = tmdb_data.get("external_ids", {}).get("imdb_id") or ""
+    movie = tmdb_data["results"][0]
+    title = movie.get("title", "N/A")
+    overview = movie.get("overview", "No description available.")
+    release_date = movie.get("release_date", "Unknown")
+    rating = movie.get("vote_average", "N/A")
+    poster_path = movie.get("poster_path")
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
 
-    # static placeholders (you can change to dynamic later)
-    ott = "Amazon Prime Video"
-    qualities = "1080p, 720p, WEB-DL"
-    audio = "Hindi"
+    # IMDb fetch
+    imdb_url = f"{IMDB_API}/?q={title}"
+    imdb_data = requests.get(imdb_url).json()
 
-    tmdb_id = tmdb_data.get("id")
-    movie_page = f"{MOVIE_PAGE_BASE}{tmdb_id}" if tmdb_id else MOVIE_PAGE_BASE
+    genres = ", ".join([g.get("name") for g in movie.get("genre_ids", [])]) if "genre_ids" in movie else "N/A"
 
-    caption = (
-        f"✨ ᴛɪᴛʟᴇ : {title} {f'({year})' if year else ''}\n\n"
-        f"🎭 ɢᴇɴʀᴇs : {genres}\n"
-        f"📅 ʀᴇʟᴇᴀsᴇ ᴅᴀᴛᴇ : {release_date}\n"
-        f"📺 ᴏᴛᴛ        : {ott}\n"
-        f"🎞️ ǫᴜᴀʟɪᴛʏ : {qualities}\n"
-        f"🎧 ᴀᴜᴅɪᴏ    : {audio}\n"
-        f"🔥 ʀᴀᴛɪɴɢ   : {rating}\n\n"
-        f"❗️❗️Now Available on our website ❗️❗️\n\n"
-        f"💥Visit Now:- {movie_page} ⭐\n\n"
-        f"📝 Overview:\n{overview}\n"
-    )
+    caption = f"✨ **ᴛɪᴛʟᴇ:** {title}\n" \
+              f"🎭 **ɢᴇɴʀᴇs:** {genres}\n" \
+              f"📅 **ʀᴇʟᴇᴀsᴇ ᴅᴀᴛᴇ:** {release_date}\n" \
+              f"🔥 **ʀᴀᴛɪɴɢ:** {rating}\n\n" \
+              f"📝 **ᴏᴠᴇʀᴠɪᴇᴡ:** {overview}"
 
-    if imdb_id:
-        caption += f"\n🎬 IMDb: https://www.imdb.com/title/{imdb_id}/"
-        if imdb_data:
-            imdb_rating = imdb_data.get("imDbRating")
-            if imdb_rating:
-                caption += f"\n⭐ IMDb Rating: {imdb_rating}"
+    if poster_url:
+        await event.reply(file=poster_url, message=caption)
+    else:
+        await event.reply(caption)
 
-    return caption
+if __name__ == "__main__":
+    import threading
 
-# --- Telethon handlers ---
-@client
+    def run_flask():
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+    threading.Thread(target=run_flask).start()
+    client.run_until_disconnected()
